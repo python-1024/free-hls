@@ -1,5 +1,7 @@
 import argparse
-import os, re, json
+import os
+import re
+import json
 from os import path
 from os import getenv as _
 from dotenv import load_dotenv
@@ -8,111 +10,128 @@ from utils import (api, exec, execstr, tsfiles, uploader,
                     manageurl, sameparams, genslice, genrepair)
 
 def encrypt(code):
-  if not _('ENCRYPTION') == 'YES':
+    # 如果未启用加密，直接返回原始代码
+    if not _('ENCRYPTION') == 'YES':
+        return code
+
+    # 遍历所有 ts 文件，进行加密
+    for file in tsfiles(code):
+        if file.startswith('enc.'):
+            continue
+
+        print(f'正在对 {file} 进行加密，生成 enc.{file} ... ', end='')
+        key = exec(['openssl','rand','16']).hex()
+        iv  = execstr(['openssl','rand','-hex','16'])
+        exec(['openssl','aes-128-cbc','-e','-in',file,'-out','enc.%s' % file,'-p','-nosalt','-iv',iv,'-K',key])
+
+        # 将密钥信息发送到 API
+        key_id = api('POST', 'key', data={'iv': iv, 'key': key})
+        if not key_id:
+            open('out.m3u8', 'w').write(code)
+            print('失败')
+            exit(1)
+
+        print('完成')
+        # 在原始 M3U8 播放列表中添加加密信息
+        code = re.sub(f'(#EXTINF:.+$[\\r\\n]+^{file}$)', '#EXT-X-KEY:METHOD=AES-128,URI="%s/play/%s.key",IV=0x%s\n\\1' % (_('APIURL'), key_id, iv), code, 1, re.M)
+        code = code.replace(file, f'enc.{file}')
+
+    # 将加密后的代码写入文件
+    open('out.m3u8', 'w').write(code)
     return code
 
-  for file in tsfiles(code):
-    if file.startswith('enc.'):
-      continue
-
-    print(f'Encrypting {file} to enc.{file} ... ', end='')
-    key = exec(['openssl','rand','16']).hex()
-    iv  = execstr(['openssl','rand','-hex','16'])
-    exec(['openssl','aes-128-cbc','-e','-in',file,'-out','enc.%s' % file,'-p','-nosalt','-iv',iv,'-K',key])
-
-    key_id = api('POST', 'key', data={'iv': iv, 'key': key})
-    if not key_id:
-      open('out.m3u8', 'w').write(code)
-      print('failed')
-      exit(1)
-
-    print('done')
-    code = re.sub(f'(#EXTINF:.+$[\\r\\n]+^{file}$)', '#EXT-X-KEY:METHOD=AES-128,URI="%s/play/%s.key",IV=0x%s\n\\1' % (_('APIURL'), key_id, iv), code, 1, re.M)
-    code = code.replace(file, f'enc.{file}')
-
-  open('out.m3u8', 'w').write(code)
-  return code
-
 def publish(code, title=None):
-  if _('NOSERVER') == 'YES':
-    return print('The m3u8 file has been dumped to tmp/out.m3u8')
+    # 如果设置为不使用服务器，输出信息并返回
+    if _('NOSERVER') == 'YES':
+        return print('m3u8 文件已保存至 tmp/out.m3u8')
 
-  r = api('POST', 'publish', data={'code': code, 'title': title,
-                                   'params': json.dumps(uploader().params())})
-  if r:
-    url = '%s/play/%s' % (_('APIURL'), r['slug'])
-    print(f'This video has been published to: {url}')
-    print(f'You can also download it directly: {url}.m3u8')
-    print('---')
-    print('Click here to edit the information for this video:\n%s' % manageurl(f'video/{r["id"]}'))
+    # 发布视频到服务器
+    r = api('POST', 'publish', data={'code': code, 'title': title,
+                                     'params': json.dumps(uploader().params())})
+    if r:
+        url = '%s/play/%s' % (_('APIURL'), r['slug'])
+        print(f'该视频已发布至: {url}')
+        print(f'你也可以直接下载: {url}.m3u8')
+        print('---')
+        print('点击此处编辑该视频信息:\n%s' % manageurl(f'video/{r["id"]}'))
 
 def repairer(code):
-  limit = uploader().MAX_BYTES
+    # 设置单个文件的大小上限
+    limit = uploader().MAX_BYTES
 
-  for file in tsfiles(code):
-    if path.getsize(file) > limit:
-      tmp = 'rep.%s' % file
-      os.system(genrepair(file, tmp, limit * 8))
-      os.rename(tmp, file)
+    # 检查每个 ts 文件的大小，如果超过上限，尝试进行修复
+    for file in tsfiles(code):
+        if path.getsize(file) > limit:
+            tmp = 'rep.%s' % file
+            os.system(genrepair(file, tmp, limit * 8))
+            os.rename(tmp, file)
 
-      if path.getsize(file) > limit:
-        open('out.m3u8', 'w').write(code)
-        print(f'File too large: tmp/{file}')
-        print('Adjust parameters or continue execution with the same parameters')
-        exit(2)
+            # 如果修复后仍然超过上限，输出信息并退出
+            if path.getsize(file) > limit:
+                open('out.m3u8', 'w').write(code)
+                print(f'文件过大: tmp/{file}')
+                print('请调整参数或继续使用相同参数执行')
+                exit(2)
 
-  open('out.m3u8', 'w').write(code)
-  return code
+    # 将修复后的代码写入文件
+    open('out.m3u8', 'w').write(code)
+    return code
 
 
 def main():
-  parser = argparse.ArgumentParser()
-  parser.add_argument('file', type=str, help='video file')
-  parser.add_argument('title', type=str, nargs='?', help='post title')
-  parser.add_argument('time', type=int, nargs='?', help='time for pre segment', default=0)
-  parser.add_argument('-c, --config', type=str, dest='config', help='change the configuration file path')
-  args = parser.parse_args()
+    # 解析命令行参数
+    parser = argparse.ArgumentParser()
+    parser.add_argument('file', type=str, help='视频文件')
+    parser.add_argument('title', type=str, nargs='?', help='发布标题')
+    parser.add_argument('time', type=int, nargs='?', help='预分段时间', default=0)
+    parser.add_argument('-c, --config', type=str, dest='config', help='更改配置文件路径')
+    args = parser.parse_args()
 
-  load_dotenv(args.config)
-  tmpdir  = path.dirname(path.abspath(__file__)) + '/tmp'
-  command = genslice(path.abspath(args.file), args.time)
+    # 从配置文件中加载环境变量
+    load_dotenv(args.config)
+    tmpdir  = path.dirname(path.abspath(__file__)) + '/tmp'
+    command = genslice(path.abspath(args.file), args.time)
 
-  if sameparams(tmpdir, command):
-    os.chdir(tmpdir)
-  else:
-    os.mkdir(tmpdir)
-    os.chdir(tmpdir)
-    os.system(command)
-    open('command.sh', 'w').write(command)
+    # 切换到临时目录
+    if sameparams(tmpdir, command):
+        os.chdir(tmpdir)
+    else:
+        os.mkdir(tmpdir)
+        os.chdir(tmpdir)
+        os.system(command)
+        open('command.sh', 'w').write(command)
 
-  failures, completions = 0, 0
-  lines    = encrypt(repairer(open('out.m3u8', 'r').read()))
-  executor = ThreadPoolExecutor(max_workers=15)
-  futures  = {executor.submit(uploader().handle, chunk): chunk for chunk in tsfiles(lines)}
+    failures, completions = 0, 0
+    # 加密并修复视频
+    lines = encrypt(repairer(open('out.m3u8', 'r').read()))
 
-  for future in as_completed(futures):
-    completions += 1
-    result = future.result()
+    # 使用线程池并发地上传视频片段
+    executor = ThreadPoolExecutor(max_workers=15)
+    futures  = {executor.submit(uploader().handle, chunk): chunk for chunk in tsfiles(lines)}
 
-    if not result:
-      failures += 1
-      print('[%s/%s] Uploaded failed: %s' % (completions, len(futures), futures[future]))
-      continue
+    for future in as_completed(futures):
+        completions += 1
+        result = future.result()
 
-    lines = lines.replace(futures[future], result)
-    print('[%s/%s] Uploaded %s to %s' % (completions, len(futures), futures[future], result))
+        if not result:
+            failures += 1
+            print('[%s/%s] 上传失败: %s' % (completions, len(futures), futures[future]))
+            continue
 
-  #Write to file
-  open('out.m3u8', 'w').write(lines)
-  open('params.json', 'w').write(json.dumps(uploader().params()))
+        lines = lines.replace(futures[future], result)
+        print('[%s/%s] 已上传 %s 至 %s' % (completions, len(futures), futures[future], result))
 
-  if failures:
-    print('Partially successful: %d/%d' % (completions-failures, completions))
-    print('You can re-execute this program with the same parameters')
-    exit(2)
+    # 将结果写入文件
+    open('out.m3u8', 'w').write(lines)
+    open('params.json', 'w').write(json.dumps(uploader().params()))
 
-  publish(lines, args.title or path.splitext(path.basename(args.file))[0])
+    if failures:
+        print('部分成功: %d/%d' % (completions-failures, completions))
+        print('你可以使用相同参数重新执行此程序')
+        exit(2)
+
+    publish(lines, args.title or path.splitext(path.basename(args.file))[0])
 
 
 if __name__ == '__main__':
-  main()
+    main()

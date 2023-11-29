@@ -16,3 +16,8 @@ services:
 
 volumes:
   app:
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: '/Users/johnyep/docker/free-hls'
